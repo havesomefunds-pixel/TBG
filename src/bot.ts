@@ -48,11 +48,26 @@ export function applyTicTacToeMove(state: TicTacToeState, userId: string, actorU
 }
 
 const adminRoles = (config: AppConfig) => new Set([...config.ownerRoleIds, ...config.adminRoleIds]);
-const gameButtons = (gameId: string, includeDouble = true) => [new ActionRowBuilder<ButtonBuilder>().addComponents(
-  new ButtonBuilder().setCustomId(`bj:hit:${gameId}`).setLabel('Hit').setStyle(ButtonStyle.Primary),
-  new ButtonBuilder().setCustomId(`bj:stand:${gameId}`).setLabel('Stand').setStyle(ButtonStyle.Secondary),
-  new ButtonBuilder().setCustomId(`bj:double:${gameId}`).setLabel('Double Down').setStyle(ButtonStyle.Success).setDisabled(!includeDouble)
-)];
+const gameButtons = (gameId: string, includeDouble = true) => [
+  new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`bj:hit:${gameId}`)
+      .setLabel('Hit')
+      .setEmoji('👆')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`bj:stand:${gameId}`)
+      .setLabel('Stand')
+      .setEmoji('✋')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`bj:double:${gameId}`)
+      .setLabel('Double Down')
+      .setEmoji('💰')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!includeDouble)
+  )
+];
 const crashButtons = (gameId: string) => [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`crash:cashout:${gameId}`).setLabel('Cash Out').setStyle(ButtonStyle.Success))];
 const duelButtons = (gameId: string) => [new ActionRowBuilder<ButtonBuilder>().addComponents(
   new ButtonBuilder().setCustomId(`duel:accept:${gameId}`).setLabel('Accept').setStyle(ButtonStyle.Success),
@@ -96,15 +111,94 @@ function tttEmbed(game: { actorUserId: string; targetUserId: string | null }, st
   const result = winner === 'DRAW' ? 'The board is full — it is a draw.' : winner ? `<@${winner === 'X' ? game.actorUserId : game.targetUserId}> wins the match!` : `<@${state.turnUserId}>'s turn.`;
   return embed('TBG Tic-Tac-Toe', `<@${game.actorUserId}> is **X**\n<@${game.targetUserId}> is **O**\n\n${result}`, winner === 'DRAW' ? COLORS.warning : winner ? COLORS.success : COLORS.brand);
 }
+function cardEmoji(card: Parameters<typeof cardLabel>[0]): string {
+  const label = cardLabel(card);
+  const suit = label.slice(-1);
+  const rank = label.slice(0, -1);
+
+  const suitBase: Record<string, number> = {
+    '♠': 0x1F0A0,
+    '♥': 0x1F0B0,
+    '♦': 0x1F0C0,
+    '♣': 0x1F0D0,
+  };
+
+  const rankOffset: Record<string, number> = {
+    A: 1,
+    '2': 2,
+    '3': 3,
+    '4': 4,
+    '5': 5,
+    '6': 6,
+    '7': 7,
+    '8': 8,
+    '9': 9,
+    '10': 10,
+    J: 11,
+    Q: 13,
+    K: 14,
+  };
+
+  const base = suitBase[suit];
+  const offset = rankOffset[rank];
+
+  if (base === undefined || offset === undefined) return label;
+  return String.fromCodePoint(base + offset);
+}
 function blackjackEmbed(state: BlackjackState, wager: number, balance: number, terminal = false, result = '', payout = 0) {
-  const dealer = terminal ? `${state.dealer.map(cardLabel).join(' ')} (${blackjackValue(state.dealer)})` : `${cardLabel(state.dealer[0]!)} ??`;
-  return embed('🂡 TBG Blackjack', terminal ? `**${result}**` : 'Choose **Hit**, **Stand**, or **Double Down**.', terminal && payout === 0 ? COLORS.danger : terminal ? COLORS.success : COLORS.brand).addFields(
-    { name: 'Your hand', value: `${state.player.map(cardLabel).join(' ')} (${blackjackValue(state.player)})`, inline: true },
-    { name: 'Dealer', value: dealer, inline: true },
-    { name: 'Wager', value: money(wager), inline: true },
-    { name: terminal ? 'XP change' : 'Escrowed', value: terminal ? signedXp(payout - wager) : signedXp(-wager), inline: true },
-    { name: terminal ? 'Payout' : 'Balance', value: terminal ? money(payout) : money(balance), inline: true },
-    ...(terminal ? [{ name: 'New balance', value: money(balance), inline: true }] : [])
+  const playerCards = state.player.map(cardEmoji).join(' ');
+  const dealerCards = terminal
+    ? `${state.dealer.map(cardEmoji).join(' ')}`
+    : `${cardEmoji(state.dealer[0]!)} 🂠`;
+
+  const playerValue = blackjackValue(state.player);
+  const dealerValue = terminal ? blackjackValue(state.dealer) : blackjackValue([state.dealer[0]!]);
+
+  const title = terminal ? '🃏 TBG Blackjack — Result' : '🃏 TBG Blackjack';
+  const description = terminal
+    ? `## ${result}`
+    : 'Use the buttons below to **Hit**, **Stand**, or **Double Down**.';
+
+  const color =
+    terminal && payout === 0
+      ? COLORS.danger
+      : terminal && payout === wager
+        ? COLORS.warning
+        : terminal
+          ? COLORS.success
+          : COLORS.brand;
+
+  return embed(title, description, color).addFields(
+    {
+      name: '👤 Your Hand',
+      value: `${playerCards}\n**Total:** ${playerValue}`,
+      inline: true,
+    },
+    {
+      name: '🎩 Dealer',
+      value: terminal
+        ? `${dealerCards}\n**Total:** ${dealerValue}`
+        : `${dealerCards}\n**Visible:** ${dealerValue}`,
+      inline: true,
+    },
+    {
+      name: '💰 Wager',
+      value: money(wager),
+      inline: true,
+    },
+    {
+      name: terminal ? '📈 XP Change' : '🔒 Escrowed',
+      value: terminal ? signedXp(payout - wager) : signedXp(-wager),
+      inline: true,
+    },
+    {
+      name: terminal ? '💵 Payout' : '🏦 Balance',
+      value: terminal ? money(payout) : money(balance),
+      inline: true,
+    },
+    ...(terminal
+      ? [{ name: '🪙 New Balance', value: money(balance), inline: true }]
+      : [])
   );
 }
 function crashEmbed(description: string, wager: number, balance: number, color = COLORS.brand, point?: number, payout?: number) {
