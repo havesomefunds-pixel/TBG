@@ -1,47 +1,92 @@
-# TBG virtual-XP bot
+# TBGBot virtual-XP bot
 
-TBG is a Discord bot for one server, with virtual, non-redeemable XP only. It has no payments, cash-out, crypto, or real-world value exchange. The security boundary is the required `TBG_GUILD_ID`, never a server name.
+TBGBot is a prefix-command Discord bot for virtual, non-redeemable XP. It has no payments, cash-out, crypto, or real-world value exchange.
+
+One TBGBot application, one running bot process, and one PostgreSQL database can serve any number of Discord servers. Every guild has an isolated economy and configuration: members, XP, levels, prestige, leaderboards, cooldowns, games and escrow, ledger history, raffles, quests, bounties, voice stats, prefixes, allowed channels, feature toggles, and bot roles never cross guild boundaries.
 
 ## Quick start
 
-1. Use Node 22 and PostgreSQL 17. Copy `.env.example` to `.env` and fill every required value.
+1. Use Node 22 and PostgreSQL 17. Copy `.env.example` to a private `.env` and supply the required values.
 2. Run `npm ci`, `npm run db:migrate`, `npm run build`, and `npm test`.
-3. Run `npm start`, or `docker compose up -d --build`.
+3. Run `npm start`, or use Docker Compose with `docker compose up -d --build`.
 
-The health endpoint binds to loopback only: `curl http://127.0.0.1:3000/healthz`. `/readyz` also checks the database and Discord readiness.
+The health endpoint binds to loopback only: `curl http://127.0.0.1:3000/healthz`. `/readyz` also checks PostgreSQL and Discord readiness.
 
-## Discord setup
+## Discord installation
 
-Create a Discord application and bot, then set `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and the numeric `TBG_GUILD_ID`. Invite with the `bot` scope. Minimum permissions are View Channels, Send Messages, Embed Links, Read Message History, and Add Reactions if components are enabled. Enable Guilds, Guild Members, Guild Messages/Message Content, Guild Message Reactions, and Guild Voice States intents. Do not grant Administrator.
+Create one Discord application and bot, set `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`, then invite that bot to each server with the `bot` scope. Recommended permissions are View Channels, Send Messages, Embed Links, Read Message History, and Add Reactions. Add Use External Emojis if desired by the server.
 
-Only events and interactions bearing the configured guild ID are processed. DMs receive the configured brief reply; external guild events are ignored. At startup, the bot warns if the configured guild's display name is not `TBG`, but this warning does not replace ID checks.
+Enable these Gateway Intents in the Discord Developer Portal:
 
-## Configuration and administration
+- Guilds
+- Guild Members
+- Guild Messages
+- Message Content (required for prefix commands)
+- Guild Message Reactions
+- Guild Voice States
 
-`OWNER_ROLE_IDS`, `ADMIN_ROLE_IDS`, and `MODERATOR_ROLE_IDS` are comma-separated numeric role IDs. The safe defaults retain TBG's configured owner role `1458348294123159683` and admin/moderator role `1458348294123159684`. Administrator/Moderate Members permissions are also honored. Administrators can export settings through `!admin-settings-export` and toggle maintenance through `!admin-settings <on|off>`; changes are versioned and audited. Moderators can use `!admin-freeze @user <minutes> <reason>`, which is also audit logged. Settings include XP rules, progression, games, channels, feature switches, and maintenance mode. Never add tokens, private keys, or production `.env` files to Git.
+TBGBot does not need Discord's Administrator permission. On joining a server, it automatically creates a fresh default `GuildConfig`; startup also initializes any guilds already connected. It never copies another server's user data or mutable settings. Economy and game commands do not run in DMs; DMs receive a generic installation message instead.
 
-Default progression is 0–50, with cumulative threshold `50 × level²` XP (level 50 is 125,000 XP). Unlocks: level 0 base games/activity, level 5 `rob`, level 15 `donate`/`coinflip`, level 20 `give`, level 50 `prestige`. Prestige resets XP to its configured baseline, retains lifetime statistics, increments prestige, and writes a ledger record.
+## Per-server setup and administration
 
-Economy entries use serializable database transactions, idempotency keys, immutable ledger records, and non-negative balance checks. Interactive blackjack and crash games debit a game escrow at creation, persist their state, verify button ownership, and settle/refund exactly once. Blackjack uses a shuffled 52-card deck, dealer rules, natural 3:2 payouts, and double-down escrow. Crash derives a retained crash point and lets the player cash out its increasing multiplier. Coinflip is a transactional 1:1 virtual-XP wager. Game recovery resumes unexpired blackjack, resolves crash safely, and refunds every expiry. Configure realistic caps/cooldowns before enabling each activity.
+The default prefix is `!`. A server owner or member with Discord's Administrator permission can always administer TBGBot. A guild may additionally configure its own TBGBot admin role. Moderator actions accept the server owner, Administrator, Moderate Members permission, the configured admin role, or the configured moderator role. Legacy environment role IDs are considered only for the optional legacy/home guild identified by `TBG_GUILD_ID`; they never authorize users in another server.
+
+After inviting the bot, a server administrator should run:
+
+```text
+!setup
+!settings show
+```
+
+Useful configuration commands:
+
+- `!settings prefix ?` changes this server's prefix. Its future commands use `?`, for example `?level` and `?bj 100`.
+- `!settings channel add #bot-commands`, `!settings channel remove #bot-commands`, and `!settings channel all` control command channels.
+- `!settings xp <messageaward|messageminlength|messagecooldown|maxperhour|dailyaward|reactionaward|voiceperminute> <value>` configures XP with safe bounds.
+- `!settings games <minbet|maxbet|duelreward> <value>` configures game limits and duel rewards.
+- `!settings feature <blackjack|slots|gamble|coinflip|crash|robbery|message-xp|reaction-xp|voice-xp> <on|off>` toggles a feature for this guild only.
+- `!settings adminrole @role` and `!settings modrole @role` set optional portable bot roles; pass `clear` to remove either role.
+- `!settings reset <prefix|channels|xp|games|features|roles>` restores one configuration section to safe defaults.
+
+`!settings` and `!settings show` provide a readable summary rather than raw JSON. Changes are versioned and audit logged. `!givexp @user <amount>` remains an admin-only, guild-scoped ledgered XP award. `!admin-settings-export`, `!admin-settings <on|off>`, and `!admin-freeze @user <minutes> <reason>` remain available for existing operations.
+
+## Commands and economy safety
+
+TBGBot intentionally uses prefix commands; it does not register a slash-command UX. Run `!help` (or the current guild prefix) to see the current server's command surface and progression unlocks.
+
+- `!bj <wager>` starts persisted blackjack with Hit, Stand, and first-decision Double Down. `!crash <wager>` starts persisted Crash with a player-only Cash Out button. Both retain escrow, settlement, expiry refund, and recovery behavior.
+- `!gamble <wager>`, `!slots <wager>`, and `!coinflip <wager>` use transactional virtual-XP escrow/settlement.
+- `!duel @user`, `!rob @user`, and `!tictactoe @user` remain persisted social games.
+- `!daily`, `!level [@user]`, `!levels`, `!lb`, `!vclb`, `!longestcall`, `!autoprestige`, `!give @user <amount>`, and `!prestige` retain their progression/economy behavior.
+
+The schema keys members by `(guildId, userId)` and scopes cooldowns, voice sessions, leaderboards, ledgers, games, raffles, quests, bounties, and audit entries by guild. Every game button loads the persisted game and verifies the interaction guild plus the relevant player(s); a button from one guild cannot modify another guild's game or economy.
+
+Economy operations use serializable transactions, idempotency keys, immutable ledger records, non-negative balance checks, escrow, and duplicate-settlement protections. Do not edit balances directly with SQL.
+
+## Environment
+
+`TBG_GUILD_ID` is optional and now means only “legacy/home guild for legacy role compatibility”; it is not an allowlist. Keep secrets in private environment configuration and never commit `.env` files, tokens, passwords, or production connection strings.
+
+## Testing
+
+`npm test` runs unit tests. `npm run test:integration` starts a disposable PostgreSQL 17 container, deploys migrations to that disposable database, runs `tests/integration`, and removes the fixture afterwards. It never needs or targets a production database.
 
 ## Operations
 
-`compose.yml` runs PostgreSQL without host exposure and binds health checks to `127.0.0.1`. Install `deploy/tbg-bot.service` at `/etc/systemd/system/tbg-bot.service`, `systemctl daemon-reload`, then `systemctl enable --now tbg-bot`. Logs: `docker compose logs -f bot`; restart: `systemctl restart tbg-bot`; rollback: deploy the previous Git revision then `systemctl restart tbg-bot`.
+`compose.yml` runs PostgreSQL without host exposure and binds bot health checks to `127.0.0.1`. Back up PostgreSQL with `deploy/backup-postgres.sh` using a root-owned timer or cron job, retain encrypted off-host backups, and test restoration on an isolated database. Never use `docker compose down -v` in production.
 
-Back up with `deploy/backup-postgres.sh` using a root-owned cron/systemd timer, retain at least 14 days, encrypt and copy backups off-droplet. Test restore on an isolated database with `pg_restore -U tbg -d tbg --clean backup.dump`; do not restore over production without a confirmed maintenance window. Firewall policy: expose no database port and no public health port. The provided CI runs schema validation, lint, types, tests, and build; deploy only from a protected `main` branch after a manual secret-configured SSH/CD step.
+For the established Docker Compose deployment at `/root/vamp-giveaway-bot`, after code has been reviewed, committed, and pushed:
 
-## Runbook
+```sh
+cd /root/vamp-giveaway-bot
+git pull --ff-only origin main
+docker compose build bot
+docker compose run --rm --no-deps --entrypoint npx bot prisma migrate deploy
+docker compose up -d --no-deps --force-recreate bot
+docker compose ps
+curl -s http://127.0.0.1:3000/readyz
+echo
+docker compose logs --tail=100 bot
+```
 
-If Discord is disconnected, check `docker compose logs bot`, token/intents, bot permissions, and `GET /readyz`. If the database is unavailable, confirm `docker compose ps`, disk space, and backup age; the bot should report unready rather than grant XP. Moderators should cancel stuck games and refund escrow only after checking ledger/game IDs. Freeze suspicious accounts with a reason and expiry, preserve audit records, and never edit balances directly in SQL.
-
-## Prefix command surface
-
-TBG uses `!` message commands; public slash commands are cleared at startup. Commands never earn message XP. Buttons are used only after a game command starts a persisted game, and only its player(s) can press them.
-
-- `!bj <wager>` starts persisted blackjack with Hit, Stand, and first-decision Double Down; escrow, settlement, expiry refund, recovery, and balance are shown in TBG embeds.
-- `!gamble <wager>` rolls one d100 using configured payout bands and shows the roll, required winning roll, stake, XP change, new balance, and payout table. `!slots <wager>` and `!coinflip <wager>` use the transactional virtual-XP escrow/settlement economy.
-- `!crash <wager>` starts persisted crash and provides a player-only Cash Out button. `!duel @user` sends a target-only Accept/Decline challenge and awards the configured winner reward exactly once. `!rob @user` applies the configured chance and transfers XP or failure penalty in the serializable robbery transaction.
-- `!tictactoe @user` starts a persisted, player-only 3×3 button board with turn, win, draw, expiry, and optimistic-concurrency checks.
-- `!daily`, `!level [@user]`, `!levels`, `!lb`, `!vclb`, `!longestcall`, `!autoprestige`, `!give @user <amount>`, and `!prestige` retain progression/economy behavior and unlocks.
-- `!8ball <question>`, `!ship @user`, `!vibecheck [@user]` (also `!vibe-check`), `!raffle`, `!quests`, `!bounty [@user]`, and `!donate` provide social/event views without inventing XP movement for inactive events.
-- `!ping`, `!admin-settings-export`, `!admin-settings <on|off>`, and `!admin-freeze @user <minutes> <reason>` retain health and role/permission-protected administration.
+Skip the `prisma migrate deploy` line only when no unapplied migration exists. Do not run `docker compose config`, since it may expand sensitive environment variables.

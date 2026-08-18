@@ -1,25 +1,26 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, Events, GatewayIntentBits, REST, Routes, type ButtonInteraction, type GuildMember, type Message, type User } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, Events, GatewayIntentBits, type ButtonInteraction, type GuildMember, type Message, type User } from 'discord.js';
 import pino from 'pino';
 import { parseConfig, type AppConfig } from './config.js';
-import { inTbg, isAdmin, isModerator } from './authorization.js';
-import { guildSettings, prisma, updateSettings } from './database.js';
+import { isGuildAdmin, isGuildModerator } from './authorization.js';
+import { ensureGuildConfig, guildSettings, prisma, updateSettings } from './database.js';
 import { claimCooldown } from './cooldowns.js';
 import { isUnlocked, progressFor } from './progression.js';
-import { doubleEscrowGame, grantCappedXp, openEscrowGame, playInstantEscrowGame, prestige, resolveDuel, resolveRobbery, settleEscrowGame, transfer, updateActiveGame } from './economy.js';
+import { doubleEscrowGame, grantAdminXp, grantCappedXp, openEscrowGame, playInstantEscrowGame, prestige, resolveDuel, resolveRobbery, settleEscrowGame, transfer, updateActiveGame } from './economy.js';
 import { blackjackPayout, blackjackResult, blackjackValue, cardLabel, crashMultiplier, crashPoint, d100, dealerPlay, hitBlackjack, isNaturalBlackjack, slots, startBlackjack, type BlackjackState, validateBet } from './games.js';
 import { fairnessMetadata, random } from './fairness.js';
 import { awardVoiceXp, startVoice, stopVoice } from './voice.js';
+import { DEFAULT_SETTINGS, defaultSettings, type Settings } from './default-settings.js';
 
-export const PREFIX = '!';
+export const PREFIX = DEFAULT_SETTINGS.prefix;
 const COLORS = { brand: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c, muted: 0x99aab5 };
-const COMMANDS = new Set(['ping', 'level', 'levels', 'lb', 'vclb', 'longestcall', 'autoprestige', 'bj', 'slots', 'gamble', 'daily', 'crash', 'vibecheck', 'ship', '8ball', 'raffle', 'quests', 'bounty', 'tictactoe', 'duel', 'rob', 'donate', 'coinflip', 'give', 'givexp', 'prestige', 'admin-settings-export', 'admin-settings', 'admin-freeze']);
+const COMMANDS = new Set(['ping', 'help', 'setup', 'settings', 'level', 'levels', 'lb', 'vclb', 'longestcall', 'autoprestige', 'bj', 'slots', 'gamble', 'daily', 'crash', 'vibecheck', 'ship', '8ball', 'raffle', 'quests', 'bounty', 'tictactoe', 'duel', 'rob', 'donate', 'coinflip', 'give', 'givexp', 'prestige', 'admin-settings-export', 'admin-settings', 'admin-freeze']);
 const EIGHT_BALL = ['Absolutely.', 'Signs point to yes.', 'Ask again after the next round.', 'The vibes say no.', 'Without a doubt.', 'Not today.', 'It is decidedly so.', 'Better not tell you now.'];
 
 export type PrefixInvocation = { name: string; args: string[] };
 
-export function parsePrefixCommand(content: string): PrefixInvocation | null {
-  if (!content.startsWith(PREFIX)) return null;
-  const parts = content.slice(PREFIX.length).trim().match(/(?:"[^"]*"|'[^']*'|\S+)/g) ?? [];
+export function parsePrefixCommand(content: string, prefix = PREFIX): PrefixInvocation | null {
+  if (!prefix || !content.startsWith(prefix)) return null;
+  const parts = content.slice(prefix.length).trim().match(/(?:"[^"]*"|'[^']*'|\S+)/g) ?? [];
   const rawName = parts.shift();
   if (!rawName) return null;
   const raw = rawName.toLowerCase();
@@ -47,7 +48,18 @@ export function applyTicTacToeMove(state: TicTacToeState, userId: string, actorU
   return { state: { board, turnUserId: userId === actorUserId ? targetUserId : actorUserId }, mark, winner: ticTacToeWinner(board) };
 }
 
-const adminRoles = (config: AppConfig) => new Set([...config.ownerRoleIds, ...config.adminRoleIds]);
+function legacyAdminRoles(config: AppConfig, guildId: string) {
+  return config.TBG_GUILD_ID === guildId ? new Set([...config.ownerRoleIds, ...config.adminRoleIds]) : new Set<string>();
+}
+function legacyModeratorRoles(config: AppConfig, guildId: string) {
+  return config.TBG_GUILD_ID === guildId ? config.moderatorRoleIds : new Set<string>();
+}
+function isGuildAdministrator(member: GuildMember, guildId: string, guildOwnerId: string | null | undefined, settings: Settings, config: AppConfig) {
+  return isGuildAdmin(member, guildOwnerId, settings.roles.adminRoleId, legacyAdminRoles(config, guildId));
+}
+function isGuildModeration(member: GuildMember, guildId: string, guildOwnerId: string | null | undefined, settings: Settings, config: AppConfig) {
+  return isGuildModerator(member, guildOwnerId, settings.roles.adminRoleId, settings.roles.moderatorRoleId, legacyAdminRoles(config, guildId), legacyModeratorRoles(config, guildId));
+}
 const gameButtons = (gameId: string, includeDouble = true) => [
   new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
@@ -76,6 +88,7 @@ const duelButtons = (gameId: string) => [new ActionRowBuilder<ButtonBuilder>().a
 
 function featureEnabled(settings: Awaited<ReturnType<typeof guildSettings>>['settings'], name: string) { return settings.enabled[name] !== false; }
 function allowed(settings: Awaited<ReturnType<typeof guildSettings>>['settings'], channelId: string | null) { return settings.allowedChannels.length === 0 || (channelId !== null && settings.allowedChannels.includes(channelId)); }
+export function gameMatchesInteractionGuild(gameGuildId: string, interactionGuildId: string | null) { return gameGuildId === interactionGuildId; }
 function jsonState<T>(state: unknown) { return state as T; }
 function signedXp(value: number) { return `${value >= 0 ? '+' : '−'}${Math.abs(value)} XP`; }
 function money(value: number) { return `${value.toLocaleString()} XP`; }
@@ -84,6 +97,12 @@ function embed(title: string, description: string, color = COLORS.brand) { retur
 function stateOf<T>(value: unknown) { return jsonState<T>(value); }
 function requireInteger(value: string | undefined, usage: string) {
   if (!value || !/^\d+$/.test(value)) throw new Error(`Usage: ${usage}`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(`Usage: ${usage}`);
+  return parsed;
+}
+function requireConfigInteger(value: string | undefined, usage: string) {
+  if (value === undefined || !/^\d+$/.test(value)) throw new Error(`Usage: ${usage}`);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed)) throw new Error(`Usage: ${usage}`);
   return parsed;
@@ -268,17 +287,23 @@ function requiredGambleRoll(settings: Awaited<ReturnType<typeof guildSettings>>[
 export function createBot(config: AppConfig = parseConfig(), log = pino({ level: process.env.LOG_LEVEL ?? 'info' })) {
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.MessageContent] });
   client.once(Events.ClientReady, async (ready) => {
-    const guild = await ready.guilds.fetch(config.TBG_GUILD_ID).catch(() => null);
-    if (!guild) { log.error({ guildId: config.TBG_GUILD_ID }, 'Configured TBG guild is unavailable'); return; }
-    if (guild.name !== 'TBG') log.warn({ guildId: guild.id, name: guild.name }, 'Configured guild name is not TBG; ID allowlist remains authoritative');
-    await guild.commands.set([]);
+    const guilds = [...ready.guilds.cache.values()];
+    await Promise.all(guilds.map((guild) => ensureGuildConfig(guild.id)));
     await recoverGames(log);
-    log.info({ guildId: guild.id }, 'Slash commands cleared; prefix commands and persisted games are ready');
+    log.info({ guildCount: guilds.length }, 'Guild settings initialized; prefix commands and persisted games are ready');
+  });
+  client.on(Events.GuildCreate, async (guild) => {
+    try {
+      await ensureGuildConfig(guild.id);
+      log.info({ guildId: guild.id }, 'Initialized settings for newly joined guild');
+    } catch (error) {
+      log.error({ err: error, guildId: guild.id }, 'Unable to initialize newly joined guild');
+    }
   });
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isButton()) return;
     try {
-      if (!inTbg(interaction.guildId, config.TBG_GUILD_ID)) return void await interaction.reply({ content: 'This bot operates only in TBG.', ephemeral: true });
+      if (!interaction.guildId) return void await interaction.reply({ content: config.DM_REPLY, ephemeral: true });
       await component(interaction);
     } catch (error) {
       log.error({ err: error, interactionId: interaction.id }, 'Component interaction failed');
@@ -288,26 +313,25 @@ export function createBot(config: AppConfig = parseConfig(), log = pino({ level:
   client.on(Events.MessageCreate, async (message) => { try {
     if (message.author.bot) return;
     if (!message.guildId) { await message.author.send(config.DM_REPLY).catch(() => undefined); return; }
-    if (!inTbg(message.guildId, config.TBG_GUILD_ID)) return;
-    const command = parsePrefixCommand(message.content);
+    const initialSettings = await guildSettings(message.guildId);
+    const command = parsePrefixCommand(message.content, initialSettings.settings.prefix);
     if (command) { await prefixCommand(message, command, config); return; }
-    if (message.content.startsWith(PREFIX)) return;
-    const settings = await guildSettings(message.guildId);
-    if (!featureEnabled(settings.settings, 'message-xp') || !allowed(settings.settings, message.channelId) || message.content.trim().length < settings.settings.xp.messageMinLength || !(await claimCooldown(message.guildId, message.author.id, 'message-xp', settings.settings.xp.messageCooldownSeconds * 1000))) return;
-    await grantCappedXp({ guildId: message.guildId, userId: message.author.id, requested: settings.settings.xp.messageAward, hourlyCap: settings.settings.xp.maxPerHour, kind: 'XP_AWARD', reason: 'eligible message', idempotencyKey: `message:${message.id}`, configVersion: settings.version }, settings.settings.progression);
+    if (message.content.startsWith(initialSettings.settings.prefix)) return;
+    if (!featureEnabled(initialSettings.settings, 'message-xp') || !allowed(initialSettings.settings, message.channelId) || message.content.trim().length < initialSettings.settings.xp.messageMinLength || !(await claimCooldown(message.guildId, message.author.id, 'message-xp', initialSettings.settings.xp.messageCooldownSeconds * 1000))) return;
+    await grantCappedXp({ guildId: message.guildId, userId: message.author.id, requested: initialSettings.settings.xp.messageAward, hourlyCap: initialSettings.settings.xp.maxPerHour, kind: 'XP_AWARD', reason: 'eligible message', idempotencyKey: `message:${message.id}`, configVersion: initialSettings.version }, initialSettings.settings.progression);
   } catch (error) {
     log.error({ err: error, messageId: message.id }, 'Prefix command failed');
     await message.reply({ content: error instanceof Error ? `⚠️ ${error.message}` : '⚠️ That command could not be completed safely.' }).catch(() => undefined);
   } });
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
-    if (user.bot || !reaction.message.guildId || !inTbg(reaction.message.guildId, config.TBG_GUILD_ID)) return;
+    if (user.bot || !reaction.message.guildId) return;
     const settings = await guildSettings(reaction.message.guildId);
     if (!featureEnabled(settings.settings, 'reaction-xp') || !allowed(settings.settings, reaction.message.channelId) || !(await claimCooldown(reaction.message.guildId, user.id, 'reaction-xp', 60_000))) return;
     await grantCappedXp({ guildId: reaction.message.guildId, userId: user.id, requested: settings.settings.xp.reactionAward, hourlyCap: settings.settings.xp.maxPerHour, kind: 'XP_AWARD', reason: 'eligible reaction', idempotencyKey: `reaction:${reaction.message.id}:${user.id}:${reaction.emoji.identifier}`, configVersion: settings.version }, settings.settings.progression);
   });
   client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     const guildId = newState.guild.id;
-    if (!inTbg(guildId, config.TBG_GUILD_ID) || newState.member?.user.bot) return;
+    if (newState.member?.user.bot) return;
     const settings = await guildSettings(guildId);
     const oldEligible = Boolean(oldState.channelId && !oldState.selfDeaf && !oldState.serverDeaf && allowed(settings.settings, oldState.channelId));
     const newEligible = Boolean(newState.channelId && !newState.selfDeaf && !newState.serverDeaf && allowed(settings.settings, newState.channelId) && featureEnabled(settings.settings, 'voice-xp'));
@@ -321,37 +345,40 @@ export function createBot(config: AppConfig = parseConfig(), log = pino({ level:
 
 async function prefixCommand(message: Message, command: PrefixInvocation, config: AppConfig) {
   const { name, args } = command;
-  if (!COMMANDS.has(name)) return void await message.reply(`Unknown command. TBG commands use ${PREFIX}; try ${PREFIX}level, ${PREFIX}bj, or ${PREFIX}gamble.`);
   const guildId = message.guildId!;
   const userId = message.author.id;
   const settings = await guildSettings(guildId);
+  const prefix = settings.settings.prefix;
+  if (!COMMANDS.has(name)) return void await message.reply(`Unknown command. TBGBot commands use ${prefix}; try ${prefix}help, ${prefix}level, or ${prefix}bj.`);
   const profile = await prisma.member.upsert({ where: { guildId_userId: { guildId, userId } }, create: { guildId, userId }, update: {} });
   const member = message.member as GuildMember | null;
   if (!member) throw new Error('Your guild membership could not be verified. Please try again.');
-  if (settings.maintenance && !isAdmin(member, adminRoles(config))) throw new Error('Maintenance mode is enabled.');
-    if (name === 'givexp') {
-    if (!isAdmin(member, adminRoles(config))) {
+  const guildOwnerId = message.guild?.ownerId;
+  const administrator = isGuildAdministrator(member, guildId, guildOwnerId, settings.settings, config);
+  if (settings.maintenance && !administrator) throw new Error('Maintenance mode is enabled.');
+  if (name === 'givexp') {
+    if (!administrator) {
       throw new Error('Admin authorization required.');
     }
+    if (!allowed(settings.settings, message.channelId)) throw new Error('This command is not enabled in this channel.');
 
-    const target = requireMention(message, args[0], '!givexp @user <amount>');
+    const target = requireMention(message, args[0], `${prefix}givexp @user <amount>`);
 
     if (target.bot) {
       throw new Error('You cannot give XP to a bot.');
     }
 
-    const amount = requireInteger(args[1], '!givexp @user <amount>');
+    const amount = requireInteger(args[1], `${prefix}givexp @user <amount>`);
 
     if (amount < 1 || amount > 1_000_000) {
       throw new Error('XP amount must be between 1 and 1,000,000.');
     }
 
-    await grantCappedXp(
+    await grantAdminXp(
       {
         guildId,
         userId: target.id,
         requested: amount,
-        hourlyCap: Number.MAX_SAFE_INTEGER,
         kind: 'XP_AWARD',
         reason: `admin XP grant by ${message.author.id}`,
         idempotencyKey: `admin-givexp:${message.id}`,
@@ -396,13 +423,19 @@ async function prefixCommand(message: Message, command: PrefixInvocation, config
       ],
     });
   }
+  if (name === 'setup') return void await showSetup(message, settings.settings);
+  if (name === 'help') return void await showHelp(message, settings.settings, administrator, profile.level);
+  if (name === 'settings') {
+    if (!administrator) throw new Error('Admin authorization required.');
+    return void await settingsCommand(message, args, settings.settings);
+  }
   if (!featureEnabled(settings.settings, name)) throw new Error('This feature is currently disabled.');
   if (!allowed(settings.settings, message.channelId) && !name.startsWith('admin-')) throw new Error('This command is not enabled in this channel.');
   if (!isUnlocked(name, profile.level) && !name.startsWith('admin-')) throw new Error(`Unlocks at a higher level (you are level ${profile.level}).`);
   if (name === 'ping') return void await message.reply(`Pong: ${message.client.ws.ping}ms · database ready`);
   if (name === 'level' || name === 'levels') {
     if (name === 'levels') return void await message.reply(`Level curve: ${settings.settings.progression.thresholds.map((threshold, level) => `L${level}:${threshold}`).join(' · ')}`);
-    const target = args[0] ? requireMention(message, args[0], '!level [@user]') : message.author;
+    const target = args[0] ? requireMention(message, args[0], `${prefix}level [@user]`) : message.author;
     const targetProfile = await prisma.member.upsert({ where: { guildId_userId: { guildId, userId: target.id } }, create: { guildId, userId: target.id }, update: {} });
     const progress = progressFor(targetProfile.xp, settings.settings.progression);
     return void await message.reply(`<@${target.id}> — Level ${progress.level}, ${money(progress.xp)}, ${money(progress.xpToNext)} to next, Prestige ${targetProfile.prestige}.`);
@@ -418,28 +451,168 @@ async function prefixCommand(message: Message, command: PrefixInvocation, config
     const granted = await grantCappedXp({ guildId, userId, requested: settings.settings.xp.dailyAward, hourlyCap: settings.settings.xp.maxPerHour, kind: 'XP_AWARD', reason: 'daily reward', idempotencyKey: `daily:${userId}:${new Date().toISOString().slice(0, 10)}`, configVersion: settings.version }, settings.settings.progression);
     return void await message.reply(granted ? `Claimed ${money(granted.amount)}. New balance: ${money(granted.balanceAfter)}.` : 'Your hourly XP cap has been reached.');
   }
-  if (name === 'bj') return void await startBj(message, requireInteger(args[0], '!bj <wager>'), settings);
-  if (name === 'crash') return void await startCrash(message, requireInteger(args[0], '!crash <wager>'), settings);
-  if (name === 'coinflip') return void await startCoinflip(message, requireInteger(args[0], '!coinflip <wager>'), settings);
-  if (name === 'gamble') return void await startGamble(message, requireInteger(args[0], '!gamble <wager>'), settings);
-  if (name === 'slots') return void await startSlots(message, requireInteger(args[0], '!slots <wager>'), settings);
+  if (name === 'bj') return void await startBj(message, requireInteger(args[0], `${prefix}bj <wager>`), settings);
+  if (name === 'crash') return void await startCrash(message, requireInteger(args[0], `${prefix}crash <wager>`), settings);
+  if (name === 'coinflip') return void await startCoinflip(message, requireInteger(args[0], `${prefix}coinflip <wager>`), settings);
+  if (name === 'gamble') return void await startGamble(message, requireInteger(args[0], `${prefix}gamble <wager>`), settings);
+  if (name === 'slots') return void await startSlots(message, requireInteger(args[0], `${prefix}slots <wager>`), settings);
   if (name === 'give') {
-    const target = requireMention(message, args[0], '!give @user <amount>'); assertOtherHuman(target, userId, 'give XP to');
-    const amount = requireInteger(args[1], '!give @user <amount>'); await transfer(guildId, userId, target.id, amount, `give:${message.id}`, settings.version, settings.settings.progression);
+    const target = requireMention(message, args[0], `${prefix}give @user <amount>`); assertOtherHuman(target, userId, 'give XP to');
+    const amount = requireInteger(args[1], `${prefix}give @user <amount>`); await transfer(guildId, userId, target.id, amount, `give:${message.id}`, settings.version, settings.settings.progression);
     return void await message.reply(`Transferred ${money(amount)} to <@${target.id}>.`);
   }
   if (name === 'prestige') { await prestige(guildId, userId, `prestige:${message.id}`, settings.version, settings.settings.progression); return void await message.reply('Prestige recorded. Your lifetime stats remain intact.'); }
-  if (name === 'rob') return void await startRobbery(message, requireMention(message, args[0], '!rob @user'), settings);
-  if (name === 'duel') return void await startDuel(message, requireMention(message, args[0], '!duel @user'), settings);
-  if (name === 'tictactoe') return void await startTicTacToe(message, requireMention(message, args[0], '!tictactoe @user'));
-  if (name === '8ball') return void await message.reply({ embeds: [embed('🎱 TBG 8-Ball', args.length ? `**Question:** ${args.join(' ')}\n\n**Answer:** ${EIGHT_BALL[random.int(0, EIGHT_BALL.length - 1)]!}` : 'Ask a question: `!8ball <question>`.', COLORS.muted)] });
-  if (name === 'ship') { const target = requireMention(message, args[0], '!ship @user'); const score = random.int(0, 100); return void await message.reply({ embeds: [embed('💞 TBG Ship', `<@${userId}> + <@${target.id}>\n\n**Compatibility:** ${score}%`, score >= 70 ? COLORS.success : score >= 40 ? COLORS.warning : COLORS.danger)] }); }
-  if (name === 'vibecheck') { const target = args[0] ? requireMention(message, args[0], '!vibecheck [@user]') : message.author; const vibes = ['immaculate', 'locked in', 'chaotic good', 'mysterious', 'main-character']; return void await message.reply({ embeds: [embed('✨ TBG Vibe Check', `<@${target.id}> is **${vibes[random.int(0, vibes.length - 1)]!}** today.`, COLORS.muted)] }); }
+  if (name === 'rob') return void await startRobbery(message, requireMention(message, args[0], `${prefix}rob @user`), settings);
+  if (name === 'duel') return void await startDuel(message, requireMention(message, args[0], `${prefix}duel @user`), settings);
+  if (name === 'tictactoe') return void await startTicTacToe(message, requireMention(message, args[0], `${prefix}tictactoe @user`));
+  if (name === '8ball') return void await message.reply({ embeds: [embed('🎱 TBG 8-Ball', args.length ? `**Question:** ${args.join(' ')}\n\n**Answer:** ${EIGHT_BALL[random.int(0, EIGHT_BALL.length - 1)]!}` : `Ask a question: \`${prefix}8ball <question>\`.`, COLORS.muted)] });
+  if (name === 'ship') { const target = requireMention(message, args[0], `${prefix}ship @user`); const score = random.int(0, 100); return void await message.reply({ embeds: [embed('💞 TBG Ship', `<@${userId}> + <@${target.id}>\n\n**Compatibility:** ${score}%`, score >= 70 ? COLORS.success : score >= 40 ? COLORS.warning : COLORS.danger)] }); }
+  if (name === 'vibecheck') { const target = args[0] ? requireMention(message, args[0], `${prefix}vibecheck [@user]`) : message.author; const vibes = ['immaculate', 'locked in', 'chaotic good', 'mysterious', 'main-character']; return void await message.reply({ embeds: [embed('✨ TBG Vibe Check', `<@${target.id}> is **${vibes[random.int(0, vibes.length - 1)]!}** today.`, COLORS.muted)] }); }
   if (name === 'raffle') return void await showRaffle(message);
   if (name === 'quests') return void await showQuests(message);
-  if (name === 'bounty') return void await showBounties(message, args[0]);
+  if (name === 'bounty') return void await showBounties(message, args[0], prefix);
   if (name === 'donate') return void await message.reply({ embeds: [embed('🎁 TBG Donate', 'There is no active donation-wheel event right now. This command does not move XP while the event is inactive.', COLORS.muted)] });
   if (name.startsWith('admin-')) return void await adminCommand(message, name, args, config, settings);
+}
+
+const FEATURE_NAMES: Record<string, string> = {
+  blackjack: 'bj', bj: 'bj', slots: 'slots', gamble: 'gamble', coinflip: 'coinflip', crash: 'crash',
+  robbery: 'rob', rob: 'rob', 'message-xp': 'message-xp', messagexp: 'message-xp',
+  'reaction-xp': 'reaction-xp', reactionxp: 'reaction-xp', 'voice-xp': 'voice-xp', voicexp: 'voice-xp'
+};
+
+function settingsEmbed(settings: Settings) {
+  const channelSummary = settings.allowedChannels.length ? settings.allowedChannels.map((id) => `<#${id}>`).join(', ') : 'All channels';
+  const disabled = Object.entries(settings.enabled).filter(([, enabled]) => !enabled).map(([name]) => name).join(', ') || 'None';
+  return embed('TBGBot Server Settings', `Settings are isolated to this server. Use \`${settings.prefix}setup\` for the admin guide.`, COLORS.brand).addFields(
+    { name: 'Prefix', value: `\`${settings.prefix}\``, inline: true },
+    { name: 'Command channels', value: channelSummary.slice(0, 1_000), inline: true },
+    { name: 'Disabled features', value: disabled.slice(0, 1_000), inline: false },
+    { name: 'XP', value: `Message ${settings.xp.messageAward} · daily ${settings.xp.dailyAward} · reaction ${settings.xp.reactionAward} · voice ${settings.xp.voicePerMinute}/min`, inline: false },
+    { name: 'Games', value: `Bets ${settings.games.minBet}–${settings.games.maxBet} XP · duel reward ${settings.games.duelReward} XP`, inline: false },
+    { name: 'Roles', value: `Admin: ${settings.roles.adminRoleId ? `<@&${settings.roles.adminRoleId}>` : 'Discord Administrator / owner'}\nModerator: ${settings.roles.moderatorRoleId ? `<@&${settings.roles.moderatorRoleId}>` : 'Moderate Members / admin'}`, inline: false }
+  );
+}
+
+async function showSetup(message: Message, settings: Settings) {
+  const prefix = settings.prefix;
+  await message.reply({ embeds: [embed('TBGBot setup', [
+    'This server starts with an empty, isolated virtual-XP economy.',
+    '',
+    `**1.** Review settings: \`${prefix}settings show\``,
+    `**2.** Set a prefix: \`${prefix}settings prefix ?\``,
+    `**3.** Limit command channels: \`${prefix}settings channel add #bot-commands\``,
+    `**4.** Tune XP and bets: \`${prefix}settings xp messageaward 15\` and \`${prefix}settings games maxbet 5000\``,
+    `**5.** Turn games on/off: \`${prefix}settings feature blackjack off\``,
+    `**6.** Optionally set bot roles: \`${prefix}settings adminrole @BotAdmin\``,
+    '',
+    'Server owners and Discord Administrators always retain configuration access.'
+  ].join('\n'), COLORS.success)] });
+}
+
+async function showHelp(message: Message, settings: Settings, administrator: boolean, level: number) {
+  const prefix = settings.prefix;
+  const publicCommands = ['level', 'lb', 'daily', 'bj', 'slots', 'gamble', 'crash', 'duel', 'tictactoe', 'rob', 'coinflip', 'give', 'prestige']
+    .filter((command) => featureEnabled(settings, command) && isUnlocked(command, level));
+  const adminCommands = administrator ? `\n\n**Admin:** \`${prefix}setup\`, \`${prefix}settings\`, \`${prefix}givexp @user <amount>\`, \`${prefix}admin-freeze @user <minutes> <reason>\`` : '';
+  await message.reply({ embeds: [embed('TBGBot help', `Use \`${prefix}<command>\` in this server.\n\n**Available now:** ${publicCommands.map((command) => `\`${prefix}${command}\``).join(' ') || 'No public commands are enabled.'}\n\n**Unlocks:** rob at level 5 · coinflip at 15 · give at 20 · prestige at 50.${adminCommands}`, COLORS.brand)] });
+}
+
+function guildChannelId(message: Message, value: string | undefined, usage: string) {
+  const match = /^(?:<#(\d+)>|(\d+))$/.exec(value ?? '');
+  const channelId = match?.[1] ?? match?.[2];
+  const channel = channelId ? message.guild?.channels.cache.get(channelId) : undefined;
+  if (!channel || !channel.isTextBased()) throw new Error(`Usage: ${usage}`);
+  return channel.id;
+}
+
+function guildRoleId(message: Message, value: string | undefined, usage: string) {
+  const match = /^(?:<@&(\d+)>|(\d+))$/.exec(value ?? '');
+  const roleId = match?.[1] ?? match?.[2];
+  const role = roleId ? message.guild?.roles.cache.get(roleId) : undefined;
+  if (!role || role.id === message.guildId) throw new Error(`Usage: ${usage}`);
+  return role.id;
+}
+
+async function saveSettings(message: Message, settings: Settings, notice: string) {
+  await updateSettings(message.guildId!, settings, message.author.id);
+  await message.reply(notice);
+}
+
+async function settingsCommand(message: Message, args: string[], current: Settings) {
+  const prefix = current.prefix;
+  const section = args[0]?.toLowerCase();
+  if (!section || section === 'show') return void await message.reply({ embeds: [settingsEmbed(current)] });
+  if (section === 'prefix') {
+    const value = args[1];
+    if (!value || !/^\S{1,5}$/.test(value)) throw new Error(`Usage: ${prefix}settings prefix <1-5 non-space characters>`);
+    return void await saveSettings(message, { ...current, prefix: value }, `Prefix changed to \`${value}\` for this server. Use \`${value}settings\` from now on.`);
+  }
+  if (section === 'channel' || section === 'channels') {
+    const action = args[1]?.toLowerCase();
+    if (action === 'all') return void await saveSettings(message, { ...current, allowedChannels: [] }, 'Commands are now allowed in all channels in this server.');
+    const channelId = guildChannelId(message, args[2], `${prefix}settings channel <add|remove> #channel`);
+    if (action === 'add') {
+      const allowedChannels = [...new Set([...current.allowedChannels, channelId])];
+      return void await saveSettings(message, { ...current, allowedChannels }, `Commands are now allowed in <#${channelId}>.`);
+    }
+    if (action === 'remove') {
+      const allowedChannels = current.allowedChannels.filter((id) => id !== channelId);
+      return void await saveSettings(message, { ...current, allowedChannels }, `Removed <#${channelId}> from the command-channel list.`);
+    }
+    throw new Error(`Usage: ${prefix}settings channel <add|remove> #channel | ${prefix}settings channel all`);
+  }
+  if (section === 'xp') {
+    const key = args[1]?.toLowerCase().replace(/[-_]/g, '');
+    const limits: Record<string, { field: keyof Settings['xp']; min: number; max: number }> = {
+      messageaward: { field: 'messageAward', min: 0, max: 1_000 }, messageminlength: { field: 'messageMinLength', min: 0, max: 4_000 },
+      messagecooldown: { field: 'messageCooldownSeconds', min: 0, max: 3_600 }, maxperhour: { field: 'maxPerHour', min: 0, max: 50_000 },
+      dailyaward: { field: 'dailyAward', min: 0, max: 100_000 }, reactionaward: { field: 'reactionAward', min: 0, max: 1_000 }, voiceperminute: { field: 'voicePerMinute', min: 0, max: 1_000 }
+    };
+    const rule = key ? limits[key] : undefined;
+    if (!rule) throw new Error(`Usage: ${prefix}settings xp <messageaward|messageminlength|messagecooldown|maxperhour|dailyaward|reactionaward|voiceperminute> <value>`);
+    const value = requireConfigInteger(args[2], `${prefix}settings xp ${key} <value>`);
+    if (value < rule.min || value > rule.max) throw new Error(`XP setting must be between ${rule.min} and ${rule.max}.`);
+    return void await saveSettings(message, { ...current, xp: { ...current.xp, [rule.field]: value } }, `Updated XP setting \`${key}\` to ${value}.`);
+  }
+  if (section === 'games' || section === 'game') {
+    const key = args[1]?.toLowerCase().replace(/[-_]/g, '');
+    const limits: Record<string, { field: 'minBet' | 'maxBet' | 'duelReward'; min: number; max: number }> = {
+      minbet: { field: 'minBet', min: 1, max: 1_000_000 }, maxbet: { field: 'maxBet', min: 1, max: 10_000_000 }, duelreward: { field: 'duelReward', min: 0, max: 1_000_000 }
+    };
+    const rule = key ? limits[key] : undefined;
+    if (!rule) throw new Error(`Usage: ${prefix}settings games <minbet|maxbet|duelreward> <value>`);
+    const value = requireConfigInteger(args[2], `${prefix}settings games ${key} <value>`);
+    if (value < rule.min || value > rule.max) throw new Error(`Game setting must be between ${rule.min} and ${rule.max}.`);
+    const games = { ...current.games, [rule.field]: value };
+    if (games.minBet > games.maxBet) throw new Error('Minimum bet cannot exceed maximum bet.');
+    return void await saveSettings(message, { ...current, games }, `Updated game setting \`${key}\` to ${value}.`);
+  }
+  if (section === 'feature') {
+    const feature = FEATURE_NAMES[args[1]?.toLowerCase() ?? ''];
+    const value = args[2]?.toLowerCase();
+    if (!feature || (value !== 'on' && value !== 'off')) throw new Error(`Usage: ${prefix}settings feature <blackjack|slots|gamble|coinflip|crash|robbery|message-xp|reaction-xp|voice-xp> <on|off>`);
+    return void await saveSettings(message, { ...current, enabled: { ...current.enabled, [feature]: value === 'on' } }, `${args[1]} is now ${value} in this server.`);
+  }
+  if (section === 'adminrole' || section === 'modrole' || section === 'moderatorrole') {
+    const field = section === 'adminrole' ? 'adminRoleId' : 'moderatorRoleId';
+    const value = args[1]?.toLowerCase() === 'clear' ? null : guildRoleId(message, args[1], `${prefix}settings ${section} <@role|roleId|clear>`);
+    return void await saveSettings(message, { ...current, roles: { ...current.roles, [field]: value } }, `${section === 'adminrole' ? 'Admin' : 'Moderator'} role ${value ? `set to <@&${value}>` : 'cleared'}.`);
+  }
+  if (section === 'reset') {
+    const target = args[1]?.toLowerCase();
+    const defaults = defaultSettings();
+    let next: Settings;
+    if (target === 'prefix') next = { ...current, prefix: defaults.prefix };
+    else if (target === 'channels') next = { ...current, allowedChannels: defaults.allowedChannels };
+    else if (target === 'xp') next = { ...current, xp: defaults.xp };
+    else if (target === 'games') next = { ...current, games: defaults.games };
+    else if (target === 'features') next = { ...current, enabled: defaults.enabled };
+    else if (target === 'roles') next = { ...current, roles: defaults.roles };
+    else throw new Error(`Usage: ${prefix}settings reset <prefix|channels|xp|games|features|roles>`);
+    return void await saveSettings(message, next, `Reset ${target} to this bot's safe defaults for this server.`);
+  }
+  throw new Error(`Unknown settings section. Try ${prefix}settings show.`);
 }
 
 async function startBj(message: Message, wager: number, settings: Awaited<ReturnType<typeof guildSettings>>) {
@@ -515,7 +688,7 @@ async function component(interaction: ButtonInteraction) {
   if (type === 'ttt') return void await ticTacToeComponent(interaction, action ?? '', gameId, detail);
   if (!['bj', 'crash'].includes(type ?? '')) return;
   const game = await prisma.game.findUnique({ where: { id: gameId } });
-  if (!game || game.guildId !== interaction.guildId || game.actorUserId !== interaction.user.id) return void await interaction.reply({ content: 'Only the player who opened this game can use these controls.', ephemeral: true });
+  if (!game || !gameMatchesInteractionGuild(game.guildId, interaction.guildId) || game.actorUserId !== interaction.user.id) return void await interaction.reply({ content: 'Only the player who opened this game can use these controls.', ephemeral: true });
   const settings = await guildSettings(game.guildId);
   if (game.status !== 'ACTIVE') return void await interaction.reply({ content: 'This game has already been settled.', ephemeral: true });
   if (game.expiresAt && game.expiresAt <= new Date()) {
@@ -560,7 +733,7 @@ async function blackjackComponent(interaction: ButtonInteraction, game: NonNulla
 }
 async function duelComponent(interaction: ButtonInteraction, action: string, gameId: string) {
   const game = await prisma.game.findUnique({ where: { id: gameId } });
-  if (!game || game.type !== 'duel' || game.guildId !== interaction.guildId) return void await interaction.reply({ content: 'That duel no longer exists.', ephemeral: true });
+  if (!game || game.type !== 'duel' || !gameMatchesInteractionGuild(game.guildId, interaction.guildId)) return void await interaction.reply({ content: 'That duel no longer exists.', ephemeral: true });
   if (game.targetUserId !== interaction.user.id) return void await interaction.reply({ content: 'Only the challenged player can accept or decline this duel.', ephemeral: true });
   if (game.status !== 'PENDING') return void await interaction.reply({ content: 'This duel has already been settled.', ephemeral: true });
   if (game.expiresAt && game.expiresAt <= new Date()) {
@@ -583,7 +756,7 @@ async function duelComponent(interaction: ButtonInteraction, action: string, gam
 async function ticTacToeComponent(interaction: ButtonInteraction, action: string, gameId: string, detail: string | undefined) {
   if (action !== 'move') return void await interaction.reply({ content: 'Unknown board action.', ephemeral: true });
   const game = await prisma.game.findUnique({ where: { id: gameId } });
-  if (!game || game.type !== 'tictactoe' || !game.targetUserId || game.guildId !== interaction.guildId) return void await interaction.reply({ content: 'That board no longer exists.', ephemeral: true });
+  if (!game || game.type !== 'tictactoe' || !game.targetUserId || !gameMatchesInteractionGuild(game.guildId, interaction.guildId)) return void await interaction.reply({ content: 'That board no longer exists.', ephemeral: true });
   if (![game.actorUserId, game.targetUserId].includes(interaction.user.id)) return void await interaction.reply({ content: 'Only the two challenged players can use this board.', ephemeral: true });
   if (game.status !== 'ACTIVE') return void await interaction.reply({ content: 'This match has already ended.', ephemeral: true });
   const prior = stateOf<TicTacToeState>(game.state);
@@ -638,33 +811,27 @@ async function showQuests(message: Message) {
   const quests = await prisma.questProgress.findMany({ where: { guildId: message.guildId!, userId: message.author.id, day }, orderBy: { questKey: 'asc' } });
   await message.reply({ embeds: [quests.length ? embed('📜 TBG Quests', quests.map((quest) => `• **${quest.questKey}** — ${quest.progress}${quest.claimed ? ' (claimed)' : ''}`).join('\n')) : embed('📜 TBG Quests', 'No daily quest progress yet.', COLORS.muted)] });
 }
-async function showBounties(message: Message, targetArgument: string | undefined) {
-  const target = targetArgument ? requireMention(message, targetArgument, '!bounty [@user]') : null;
+async function showBounties(message: Message, targetArgument: string | undefined, prefix: string) {
+  const target = targetArgument ? requireMention(message, targetArgument, `${prefix}bounty [@user]`) : null;
   const bounties = await prisma.bounty.findMany({ where: { guildId: message.guildId!, status: 'OPEN', expiresAt: { gt: new Date() }, ...(target ? { targetUserId: target.id } : {}) }, orderBy: { expiresAt: 'asc' }, take: 10 });
   const description = bounties.length ? bounties.map((bounty) => `• <@${bounty.targetUserId}> — ${money(bounty.escrow)} · expires <t:${Math.floor(bounty.expiresAt.getTime() / 1000)}:R>`).join('\n') : target ? `No open bounty for <@${target.id}>.` : 'No open bounties.';
   await message.reply({ embeds: [embed('🎯 TBG Bounty Board', description, bounties.length ? COLORS.warning : COLORS.muted)] });
 }
 async function adminCommand(message: Message, name: string, args: string[], config: AppConfig, settings: Awaited<ReturnType<typeof guildSettings>>) {
-  const member = message.member as GuildMember | null; if (!member) throw new Error('Your guild membership could not be verified. Please try again.'); const admins = adminRoles(config); const guildId = message.guildId!;
+  const member = message.member as GuildMember | null; if (!member) throw new Error('Your guild membership could not be verified. Please try again.'); const guildId = message.guildId!; const guildOwnerId = message.guild?.ownerId; const prefix = settings.settings.prefix;
   if (name === 'admin-freeze') {
-    if (!isModerator(member, admins, config.moderatorRoleIds)) throw new Error('Moderator authorization required.');
-    const target = requireMention(message, args[0], '!admin-freeze @user <minutes> <reason>'); const minutes = requireInteger(args[1], '!admin-freeze @user <minutes> <reason>'); const reason = args.slice(2).join(' ');
-    if (minutes < 1 || minutes > 10_080 || !reason || reason.length > 250) throw new Error('Usage: !admin-freeze @user <minutes 1-10080> <reason>');
+    if (!isGuildModeration(member, guildId, guildOwnerId, settings.settings, config)) throw new Error('Moderator authorization required.');
+    const target = requireMention(message, args[0], `${prefix}admin-freeze @user <minutes> <reason>`); const minutes = requireInteger(args[1], `${prefix}admin-freeze @user <minutes> <reason>`); const reason = args.slice(2).join(' ');
+    if (minutes < 1 || minutes > 10_080 || !reason || reason.length > 250) throw new Error(`Usage: ${prefix}admin-freeze @user <minutes 1-10080> <reason>`);
     const until = new Date(Date.now() + minutes * 60_000);
     await prisma.$transaction(async (tx) => { const frozen = await tx.member.upsert({ where: { guildId_userId: { guildId, userId: target.id } }, create: { guildId, userId: target.id }, update: {} }); await tx.member.update({ where: { id: frozen.id }, data: { frozenUntil: until, freezeReason: reason } }); await tx.auditLog.create({ data: { guildId, actorUserId: message.author.id, action: 'ACCOUNT_FROZEN', detail: { targetUserId: target.id, until: until.toISOString(), reason } } }); });
     return void await message.reply(`<@${target.id}> frozen until <t:${Math.floor(until.getTime() / 1000)}:f>.`);
   }
-  if (!isAdmin(member, admins)) throw new Error('Admin authorization required.');
+  if (!isGuildAdministrator(member, guildId, guildOwnerId, settings.settings, config)) throw new Error('Admin authorization required.');
   if (name === 'admin-settings-export') return void await message.reply(`\`\`\`json\n${JSON.stringify(settings.settings, null, 2)}\n\`\`\``);
   if (name === 'admin-settings') {
-    const value = args[0]?.toLowerCase(); if (value !== 'on' && value !== 'off') throw new Error('Usage: !admin-settings <on|off>'); const maintenance = value === 'on';
+    const value = args[0]?.toLowerCase(); if (value !== 'on' && value !== 'off') throw new Error(`Usage: ${prefix}admin-settings <on|off>`); const maintenance = value === 'on';
     await updateSettings(guildId, { ...settings.settings, maintenance }, message.author.id); await prisma.guildConfig.update({ where: { guildId }, data: { maintenance } });
     return void await message.reply(`Maintenance mode ${maintenance ? 'enabled' : 'disabled'} and settings audit logged.`);
   }
-}
-
-/** Retained for operational callers: it clears the old guild slash-command surface. */
-export async function registerCommands(config: AppConfig) {
-  const rest = new REST().setToken(config.DISCORD_TOKEN);
-  await rest.put(Routes.applicationGuildCommands(config.DISCORD_CLIENT_ID, config.TBG_GUILD_ID), { body: [] });
 }

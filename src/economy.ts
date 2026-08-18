@@ -54,6 +54,11 @@ export async function grantCappedXp(m: Omit<Mutation, 'delta'> & { requested: nu
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
+/** Admin XP grants intentionally use the same ledgered, guild-scoped award path. */
+export async function grantAdminXp(input: Omit<Mutation, 'delta'> & { requested: number }, curve: ProgressionConfig) {
+  return grantCappedXp({ ...input, hourlyCap: Number.MAX_SAFE_INTEGER }, curve);
+}
+
 export async function transfer(guildId: string, senderId: string, recipientId: string, amount: number, idempotencyKey: string, configVersion: number, curve: ProgressionConfig) {
   if (!Number.isSafeInteger(amount) || amount <= 0 || senderId === recipientId) throw new EconomyError('Invalid transfer');
   return prisma.$transaction(async (tx) => {

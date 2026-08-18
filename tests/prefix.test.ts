@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTicTacToeMove, parsePrefixCommand, ticTacToeWinner, type TicTacToeState } from '../src/bot.js';
+import { applyTicTacToeMove, gameMatchesInteractionGuild, parsePrefixCommand, ticTacToeWinner, type TicTacToeState } from '../src/bot.js';
 
 describe('prefix command parser', () => {
   it('recognizes ! commands and normalizes the supported vibecheck alias', () => {
@@ -10,6 +10,18 @@ describe('prefix command parser', () => {
 
   it('keeps quoted admin-freeze reasons together', () => {
     expect(parsePrefixCommand('!admin-freeze <@123> 30 "Repeated chargeback attempts"')).toEqual({ name: 'admin-freeze', args: ['<@123>', '30', 'Repeated chargeback attempts'] });
+  });
+
+  it('uses the current guild prefix without accepting another guild prefix', () => {
+    expect(parsePrefixCommand('?level', '?')).toEqual({ name: 'level', args: [] });
+    expect(parsePrefixCommand('!level', '?')).toBeNull();
+    expect(parsePrefixCommand('?bj 100', '?')).toEqual({ name: 'bj', args: ['100'] });
+  });
+
+  it('rejects button interactions from a different guild', () => {
+    expect(gameMatchesInteractionGuild('guild-a', 'guild-a')).toBe(true);
+    expect(gameMatchesInteractionGuild('guild-a', 'guild-b')).toBe(false);
+    expect(gameMatchesInteractionGuild('guild-a', null)).toBe(false);
   });
 });
 

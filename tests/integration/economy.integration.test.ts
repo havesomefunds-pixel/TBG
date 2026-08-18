@@ -118,4 +118,40 @@ suite('PostgreSQL escrow and game lifecycle integration', () => {
     expect(await balance('challenger')).toBe(1_100);
     expect(await database.prisma.ledger.count({ where: { gameId: game.id, kind: 'XP_AWARD' } })).toBe(1);
   });
+
+  it('keeps the same Discord user, balances, games, leaderboards, and cooldowns isolated per guild', async () => {
+    const guildA = 'guild-a'; const guildB = 'guild-b'; const userId = 'same-discord-user';
+    await economy.mutateBalance({ guildId: guildA, userId, delta: 500, kind: 'XP_AWARD', reason: 'guild A seed', idempotencyKey: 'guild-a-seed', configVersion }, DEFAULT_PROGRESSION);
+    await economy.mutateBalance({ guildId: guildB, userId, delta: 300, kind: 'XP_AWARD', reason: 'guild B seed', idempotencyKey: 'guild-b-seed', configVersion }, DEFAULT_PROGRESSION);
+    await economy.grantCappedXp({ guildId: guildA, userId, requested: 50, hourlyCap: 1_000, kind: 'XP_AWARD', reason: 'guild A message', idempotencyKey: 'guild-a-award', configVersion }, DEFAULT_PROGRESSION);
+    await economy.playInstantEscrowGame({ guildId: guildA, type: 'coinflip', actorUserId: userId, wager: 100, payout: 0, status: 'LOST', state: { heads: false }, idempotencyKey: 'guild-a-coinflip', configVersion, curve: DEFAULT_PROGRESSION, expiresAt: new Date(Date.now() + 60_000) });
+
+    await expect(database.prisma.member.findUniqueOrThrow({ where: { guildId_userId: { guildId: guildA, userId } } })).resolves.toMatchObject({ xp: 450 });
+    await expect(database.prisma.member.findUniqueOrThrow({ where: { guildId_userId: { guildId: guildB, userId } } })).resolves.toMatchObject({ xp: 300 });
+    const guildALeaderboard = await database.prisma.member.findMany({ where: { guildId: guildA }, select: { guildId: true, userId: true } });
+    expect(guildALeaderboard).toEqual([{ guildId: guildA, userId }]);
+    expect(await (await import('../../src/cooldowns.js')).claimCooldown(guildA, userId, 'daily', 60_000)).toBe(true);
+    expect(await (await import('../../src/cooldowns.js')).claimCooldown(guildB, userId, 'daily', 60_000)).toBe(true);
+  });
+
+  it('keeps GuildConfig prefix, feature toggles, and initialization independent', async () => {
+    const guildA = 'settings-guild-a'; const guildB = 'settings-guild-b';
+    const firstA = await database.guildSettings(guildA);
+    await database.updateSettings(guildA, { ...firstA.settings, prefix: '?', enabled: { ...firstA.settings.enabled, bj: false } }, 'admin-a');
+    await database.ensureGuildConfig(guildA);
+    const afterA = await database.guildSettings(guildA);
+    const afterB = await database.guildSettings(guildB);
+    expect(afterA.settings.prefix).toBe('?');
+    expect(afterA.settings.enabled.bj).toBe(false);
+    expect(afterB.settings.prefix).toBe('!');
+    expect(afterB.settings.enabled.bj).toBeUndefined();
+  });
+
+  it('makes an admin XP grant only in the invoking guild ledger/profile', async () => {
+    const guildA = 'grant-guild-a'; const guildB = 'grant-guild-b'; const userId = 'grant-target';
+    await economy.grantAdminXp({ guildId: guildA, userId, requested: 250, kind: 'XP_AWARD', reason: 'admin XP grant', idempotencyKey: 'admin-givexp-a', configVersion }, DEFAULT_PROGRESSION);
+    await expect(database.prisma.member.findUniqueOrThrow({ where: { guildId_userId: { guildId: guildA, userId } } })).resolves.toMatchObject({ xp: 250 });
+    await expect(database.prisma.member.findUnique({ where: { guildId_userId: { guildId: guildB, userId } } })).resolves.toBeNull();
+    await expect(database.prisma.ledger.count({ where: { guildId: guildA, reason: 'admin XP grant' } })).resolves.toBe(1);
+  });
 });

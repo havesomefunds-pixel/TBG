@@ -7,16 +7,17 @@ import { startVoice, stopVoice } from '../src/voice.js';
 
 const guildId = 'integration-guild';
 const curve = DEFAULT_PROGRESSION;
+const integration = process.env.TBG_INTEGRATION === '1';
+const suite = integration ? describe : describe.skip;
 
-beforeEach(async () => {
-  await prisma.ledger.deleteMany();
-  await prisma.member.deleteMany();
-  await prisma.cooldown.deleteMany();
-  await prisma.voiceSession.deleteMany();
-});
-afterAll(async () => { await prisma.$disconnect(); });
-
-describe('PostgreSQL integration', () => {
+suite('PostgreSQL integration', () => {
+  beforeEach(async () => {
+    await prisma.ledger.deleteMany();
+    await prisma.member.deleteMany();
+    await prisma.cooldown.deleteMany();
+    await prisma.voiceSession.deleteMany();
+  });
+  afterAll(async () => { await prisma.$disconnect(); });
   it('applies the Prisma schema to the disposable database', async () => {
     await expect(prisma.$queryRaw`SELECT 1`).resolves.toBeTruthy();
     await expect(prisma.member.count()).resolves.toBe(0);
@@ -60,6 +61,6 @@ describe('PostgreSQL integration', () => {
     expect(await claimCooldown(guildId, 'alice', 'daily', 60_000)).toBe(false);
     const start = new Date('2026-01-01T00:00:00.000Z');
     await startVoice(guildId, 'alice', 'channel', start);
-    expect(await stopVoice(guildId, 'alice', new Date('2026-01-01T00:01:30.000Z'))).toBe(90);
+    await expect(stopVoice(guildId, 'alice', new Date('2026-01-01T00:01:30.000Z'))).resolves.toMatchObject({ seconds: 90 });
   });
 });
