@@ -54,11 +54,11 @@ function legacyAdminRoles(config: AppConfig, guildId: string) {
 function legacyModeratorRoles(config: AppConfig, guildId: string) {
   return config.TBG_GUILD_ID === guildId ? config.moderatorRoleIds : new Set<string>();
 }
-function isGuildAdministrator(member: GuildMember, guildId: string, guildOwnerId: string | null | undefined, settings: Settings, config: AppConfig) {
-  return isGuildAdmin(member, guildOwnerId, settings.roles.adminRoleId, legacyAdminRoles(config, guildId));
+function isGuildAdministrator(member: GuildMember, guildId: string, settings: Settings, config: AppConfig) {
+  return isGuildAdmin(member, settings.roles.adminRoleId, legacyAdminRoles(config, guildId));
 }
-function isGuildModeration(member: GuildMember, guildId: string, guildOwnerId: string | null | undefined, settings: Settings, config: AppConfig) {
-  return isGuildModerator(member, guildOwnerId, settings.roles.adminRoleId, settings.roles.moderatorRoleId, legacyAdminRoles(config, guildId), legacyModeratorRoles(config, guildId));
+function isGuildModeration(member: GuildMember, guildId: string, settings: Settings, config: AppConfig) {
+  return isGuildModerator(member, settings.roles.adminRoleId, settings.roles.moderatorRoleId, legacyAdminRoles(config, guildId), legacyModeratorRoles(config, guildId));
 }
 const gameButtons = (gameId: string, includeDouble = true) => [
   new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -353,8 +353,7 @@ async function prefixCommand(message: Message, command: PrefixInvocation, config
   const profile = await prisma.member.upsert({ where: { guildId_userId: { guildId, userId } }, create: { guildId, userId }, update: {} });
   const member = message.member as GuildMember | null;
   if (!member) throw new Error('Your guild membership could not be verified. Please try again.');
-  const guildOwnerId = message.guild?.ownerId;
-  const administrator = isGuildAdministrator(member, guildId, guildOwnerId, settings.settings, config);
+  const administrator = isGuildAdministrator(member, guildId, settings.settings, config);
   if (settings.maintenance && !administrator) throw new Error('Maintenance mode is enabled.');
   if (name === 'givexp') {
     if (!administrator) {
@@ -423,7 +422,10 @@ async function prefixCommand(message: Message, command: PrefixInvocation, config
       ],
     });
   }
-  if (name === 'setup') return void await showSetup(message, settings.settings);
+  if (name === 'setup') {
+    if (!administrator) throw new Error('Admin authorization required.');
+    return void await showSetup(message, settings.settings);
+  }
   if (name === 'help') return void await showHelp(message, settings.settings, administrator, profile.level);
   if (name === 'settings') {
     if (!administrator) throw new Error('Admin authorization required.');
@@ -818,16 +820,16 @@ async function showBounties(message: Message, targetArgument: string | undefined
   await message.reply({ embeds: [embed('🎯 TBG Bounty Board', description, bounties.length ? COLORS.warning : COLORS.muted)] });
 }
 async function adminCommand(message: Message, name: string, args: string[], config: AppConfig, settings: Awaited<ReturnType<typeof guildSettings>>) {
-  const member = message.member as GuildMember | null; if (!member) throw new Error('Your guild membership could not be verified. Please try again.'); const guildId = message.guildId!; const guildOwnerId = message.guild?.ownerId; const prefix = settings.settings.prefix;
+  const member = message.member as GuildMember | null; if (!member) throw new Error('Your guild membership could not be verified. Please try again.'); const guildId = message.guildId!; const prefix = settings.settings.prefix;
   if (name === 'admin-freeze') {
-    if (!isGuildModeration(member, guildId, guildOwnerId, settings.settings, config)) throw new Error('Moderator authorization required.');
+    if (!isGuildModeration(member, guildId, settings.settings, config)) throw new Error('Moderator authorization required.');
     const target = requireMention(message, args[0], `${prefix}admin-freeze @user <minutes> <reason>`); const minutes = requireInteger(args[1], `${prefix}admin-freeze @user <minutes> <reason>`); const reason = args.slice(2).join(' ');
     if (minutes < 1 || minutes > 10_080 || !reason || reason.length > 250) throw new Error(`Usage: ${prefix}admin-freeze @user <minutes 1-10080> <reason>`);
     const until = new Date(Date.now() + minutes * 60_000);
     await prisma.$transaction(async (tx) => { const frozen = await tx.member.upsert({ where: { guildId_userId: { guildId, userId: target.id } }, create: { guildId, userId: target.id }, update: {} }); await tx.member.update({ where: { id: frozen.id }, data: { frozenUntil: until, freezeReason: reason } }); await tx.auditLog.create({ data: { guildId, actorUserId: message.author.id, action: 'ACCOUNT_FROZEN', detail: { targetUserId: target.id, until: until.toISOString(), reason } } }); });
     return void await message.reply(`<@${target.id}> frozen until <t:${Math.floor(until.getTime() / 1000)}:f>.`);
   }
-  if (!isGuildAdministrator(member, guildId, guildOwnerId, settings.settings, config)) throw new Error('Admin authorization required.');
+  if (!isGuildAdministrator(member, guildId, settings.settings, config)) throw new Error('Admin authorization required.');
   if (name === 'admin-settings-export') return void await message.reply(`\`\`\`json\n${JSON.stringify(settings.settings, null, 2)}\n\`\`\``);
   if (name === 'admin-settings') {
     const value = args[0]?.toLowerCase(); if (value !== 'on' && value !== 'off') throw new Error(`Usage: ${prefix}admin-settings <on|off>`); const maintenance = value === 'on';

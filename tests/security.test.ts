@@ -1,18 +1,55 @@
 import { describe, expect, it } from 'vitest';
+import { PermissionFlagsBits } from 'discord.js';
 import { isGuildAdmin, isGuildModerator } from '../src/authorization.js';
 import { parseConfig } from '../src/config.js';
 import { defaultSettings } from '../src/default-settings.js';
 describe('guild authorization and defaults', () => {
-  const roleMember = (id: string, roles: string[], permissions: string[] = []) => ({ id, roles: { cache: new Map(roles.map((x) => [x, true])) }, permissions: { has: (p: string) => permissions.includes(p) } });
-  it('honors a guild owner, Administrator, and current-guild configured role', () => {
-    expect(isGuildAdmin(roleMember('owner', []) as never, 'owner', null)).toBe(true);
-    expect(isGuildAdmin(roleMember('admin', [], ['Administrator']) as never, 'owner', null)).toBe(true);
-    expect(isGuildAdmin(roleMember('role-user', ['guild-admin']) as never, 'owner', 'guild-admin')).toBe(true);
-    expect(isGuildAdmin(roleMember('other', ['guild-admin']) as never, 'owner', null)).toBe(false);
+  const roleMember = (id: string, ownerId: string, roles: string[], permissions: unknown[] = []) => ({
+    id,
+    guild: { ownerId },
+    roles: { cache: new Map(roles.map((x) => [x, true])) },
+    permissions: { has: (permission: unknown) => permissions.includes(permission) }
   });
-  it('does not grant a legacy role to a new guild and honors moderation permission', () => {
-    expect(isGuildAdmin(roleMember('user', ['legacy-admin']) as never, 'owner', null)).toBe(false);
-    expect(isGuildModerator(roleMember('mod', [], ['ModerateMembers']) as never, 'owner', null, null)).toBe(true);
+
+  it('allows a guild owner to bootstrap setup and settings with default roles', () => {
+    const defaults = defaultSettings();
+    const owner = roleMember('owner', 'owner', []);
+    expect(isGuildAdmin(owner as never, defaults.roles.adminRoleId)).toBe(true);
+    expect(isGuildAdmin(owner as never, defaults.roles.adminRoleId)).toBe(true);
+  });
+
+  it('allows a Discord Administrator to bootstrap setup and settings', () => {
+    const administrator = roleMember('administrator', 'owner', [], [PermissionFlagsBits.Administrator]);
+    expect(isGuildAdmin(administrator as never, null)).toBe(true);
+    expect(isGuildAdmin(administrator as never, null)).toBe(true);
+  });
+
+  it('rejects a normal member from setup and settings administration', () => {
+    expect(isGuildAdmin(roleMember('member', 'owner', []) as never, null)).toBe(false);
+  });
+
+  it('honors only the configured admin role for the current guild', () => {
+    expect(isGuildAdmin(roleMember('role-user', 'owner', ['guild-a-admin']) as never, 'guild-a-admin')).toBe(true);
+    expect(isGuildAdmin(roleMember('same-user', 'different-owner', ['guild-a-admin']) as never, 'guild-b-admin')).toBe(false);
+  });
+
+  it('does not grant legacy roles outside the legacy guild and preserves moderator access', () => {
+    const legacyRoleUser = roleMember('user', 'owner', ['legacy-admin']);
+    expect(isGuildAdmin(legacyRoleUser as never, null)).toBe(false);
+    expect(isGuildModerator(roleMember('mod', 'owner', [], [PermissionFlagsBits.ModerateMembers]) as never, null, null)).toBe(true);
+  });
+
+  it('keeps setup authorization independent of level, channels, and feature settings', () => {
+    const settings = defaultSettings();
+    settings.allowedChannels = ['restricted-channel'];
+    settings.enabled.setup = false;
+    const owner = roleMember('owner', 'owner', []);
+    expect(isGuildAdmin(owner as never, settings.roles.adminRoleId)).toBe(true);
+  });
+
+  it('authorizes a new-guild owner for the givexp admin path with no configured role', () => {
+    const owner = roleMember('owner', 'owner', []);
+    expect(isGuildAdmin(owner as never, defaultSettings().roles.adminRoleId)).toBe(true);
   });
   it('creates independent default setting objects for new guilds', () => {
     const guildA = defaultSettings(); const guildB = defaultSettings();
