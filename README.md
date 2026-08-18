@@ -12,17 +12,17 @@ The health endpoint binds to loopback only: `curl http://127.0.0.1:3000/healthz`
 
 ## Discord setup
 
-Create a Discord application and bot, then set `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and the numeric `TBG_GUILD_ID`. Invite with `bot applications.commands`. Minimum permissions are View Channels, Send Messages, Embed Links, Read Message History, Use Application Commands, and Add Reactions if components are enabled. Enable Guilds, Guild Members, Guild Messages/Message Content (for message XP or prefix aliases), Guild Message Reactions, and Guild Voice States intents. Do not grant Administrator.
+Create a Discord application and bot, then set `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and the numeric `TBG_GUILD_ID`. Invite with the `bot` scope. Minimum permissions are View Channels, Send Messages, Embed Links, Read Message History, and Add Reactions if components are enabled. Enable Guilds, Guild Members, Guild Messages/Message Content, Guild Message Reactions, and Guild Voice States intents. Do not grant Administrator.
 
 Only events and interactions bearing the configured guild ID are processed. DMs receive the configured brief reply; external guild events are ignored. At startup, the bot warns if the configured guild's display name is not `TBG`, but this warning does not replace ID checks.
 
 ## Configuration and administration
 
-`ADMIN_ROLE_IDS` and `MODERATOR_ROLE_IDS` are comma-separated numeric role IDs. Administrator/Moderate Members permissions are also honored. Administrators can export settings through `/admin-settings-export`; changes must be audited and validated before import. Settings are versioned in `GuildConfig` and include XP rules, progression, games, channels, feature switches, and maintenance mode. Never add tokens, private keys, or production `.env` files to Git.
+`OWNER_ROLE_IDS`, `ADMIN_ROLE_IDS`, and `MODERATOR_ROLE_IDS` are comma-separated numeric role IDs. The safe defaults retain TBG's configured owner role `1458348294123159683` and admin/moderator role `1458348294123159684`. Administrator/Moderate Members permissions are also honored. Administrators can export settings through `!admin-settings-export` and toggle maintenance through `!admin-settings <on|off>`; changes are versioned and audited. Moderators can use `!admin-freeze @user <minutes> <reason>`, which is also audit logged. Settings include XP rules, progression, games, channels, feature switches, and maintenance mode. Never add tokens, private keys, or production `.env` files to Git.
 
 Default progression is 0–50, with cumulative threshold `50 × level²` XP (level 50 is 125,000 XP). Unlocks: level 0 base games/activity, level 5 `rob`, level 15 `donate`/`coinflip`, level 20 `give`, level 50 `prestige`. Prestige resets XP to its configured baseline, retains lifetime statistics, increments prestige, and writes a ledger record.
 
-Economy entries use serializable database transactions, idempotency keys, immutable ledger records, and non-negative balance checks. Game odds are configuration-backed; randomness comes from Node cryptographic APIs and fairness metadata is retained server-side. Configure realistic caps/cooldowns before enabling each activity.
+Economy entries use serializable database transactions, idempotency keys, immutable ledger records, and non-negative balance checks. Interactive blackjack and crash games debit a game escrow at creation, persist their state, verify button ownership, and settle/refund exactly once. Blackjack uses a shuffled 52-card deck, dealer rules, natural 3:2 payouts, and double-down escrow. Crash derives a retained crash point and lets the player cash out its increasing multiplier. Coinflip is a transactional 1:1 virtual-XP wager. Game recovery resumes unexpired blackjack, resolves crash safely, and refunds every expiry. Configure realistic caps/cooldowns before enabling each activity.
 
 ## Operations
 
@@ -34,6 +34,14 @@ Back up with `deploy/backup-postgres.sh` using a root-owned cron/systemd timer, 
 
 If Discord is disconnected, check `docker compose logs bot`, token/intents, bot permissions, and `GET /readyz`. If the database is unavailable, confirm `docker compose ps`, disk space, and backup age; the bot should report unready rather than grant XP. Moderators should cancel stuck games and refund escrow only after checking ledger/game IDs. Freeze suspicious accounts with a reason and expiry, preserve audit records, and never edit balances directly in SQL.
 
-## Current command surface
+## Prefix command surface
 
-Slash equivalents are registered for ping, progression/leaderboards, blackjack, slots, d100, daily, crash, novelty commands, raffle, quests, bounty, tic-tac-toe, duel, rob, donate, coinflip, give, prestige, and admin export/freeze. Prefix aliases are intentionally not enabled by default; enabling them requires a separately reviewed parser, since Message Content access and anti-spam controls are needed.
+TBG uses `!` message commands; public slash commands are cleared at startup. Commands never earn message XP. Buttons are used only after a game command starts a persisted game, and only its player(s) can press them.
+
+- `!bj <wager>` starts persisted blackjack with Hit, Stand, and first-decision Double Down; escrow, settlement, expiry refund, recovery, and balance are shown in TBG embeds.
+- `!gamble <wager>` rolls one d100 using configured payout bands and shows the roll, required winning roll, stake, XP change, new balance, and payout table. `!slots <wager>` and `!coinflip <wager>` use the transactional virtual-XP escrow/settlement economy.
+- `!crash <wager>` starts persisted crash and provides a player-only Cash Out button. `!duel @user` sends a target-only Accept/Decline challenge and awards the configured winner reward exactly once. `!rob @user` applies the configured chance and transfers XP or failure penalty in the serializable robbery transaction.
+- `!tictactoe @user` starts a persisted, player-only 3×3 button board with turn, win, draw, expiry, and optimistic-concurrency checks.
+- `!daily`, `!level [@user]`, `!levels`, `!lb`, `!vclb`, `!longestcall`, `!autoprestige`, `!give @user <amount>`, and `!prestige` retain progression/economy behavior and unlocks.
+- `!8ball <question>`, `!ship @user`, `!vibecheck [@user]` (also `!vibe-check`), `!raffle`, `!quests`, `!bounty [@user]`, and `!donate` provide social/event views without inventing XP movement for inactive events.
+- `!ping`, `!admin-settings-export`, `!admin-settings <on|off>`, and `!admin-freeze @user <minutes> <reason>` retain health and role/permission-protected administration.

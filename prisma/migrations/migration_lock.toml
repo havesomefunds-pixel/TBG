@@ -1,0 +1,3 @@
+# Prisma migration provider lock. This is metadata only; it does not connect to
+# or alter any database.
+provider = "postgresql"

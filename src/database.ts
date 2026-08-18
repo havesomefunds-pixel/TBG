@@ -7,7 +7,20 @@ export async function ensureGuildConfig(guildId: string) {
 }
 export async function guildSettings(guildId: string): Promise<{ version: number; settings: Settings; maintenance: boolean }> {
   const config = await ensureGuildConfig(guildId);
-  return { version: config.version, maintenance: config.maintenance, settings: { ...DEFAULT_SETTINGS, ...(config.settings as Partial<Settings>) } };
+  // Settings are versioned JSON. Merge nested groups as well so adding a safe
+  // default (for example a new game setting) does not break an existing guild
+  // configuration that predates that field.
+  const saved = config.settings as Partial<Settings>;
+  const settings: Settings = {
+    ...DEFAULT_SETTINGS,
+    ...saved,
+    progression: { ...DEFAULT_SETTINGS.progression, ...saved.progression },
+    xp: { ...DEFAULT_SETTINGS.xp, ...saved.xp },
+    games: { ...DEFAULT_SETTINGS.games, ...saved.games },
+    enabled: { ...DEFAULT_SETTINGS.enabled, ...saved.enabled },
+    allowedChannels: saved.allowedChannels ?? DEFAULT_SETTINGS.allowedChannels
+  };
+  return { version: config.version, maintenance: config.maintenance, settings };
 }
 export async function updateSettings(guildId: string, settings: Settings, actorUserId: string) {
   return prisma.$transaction(async (tx) => {

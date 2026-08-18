@@ -1,0 +1,15 @@
+name: tbg-integration
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: tbg_test
+      POSTGRES_PASSWORD: tbg_test_only
+      POSTGRES_DB: tbg_test
+    ports: ["127.0.0.1:55439:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tbg_test -d tbg_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
