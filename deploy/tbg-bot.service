@@ -1,0 +1,18 @@
+[Unit]
+Description=TBG Discord bot
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/tbg-bot
+ExecStart=/usr/bin/docker compose -f compose.yml up -d --build
+ExecStop=/usr/bin/docker compose -f compose.yml down
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=300
+StartLimitBurst=5
+[Install]
+WantedBy=multi-user.target
+

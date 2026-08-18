@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+enum LedgerKind {
+  XP_AWARD
+  XP_DEBIT
+  TRANSFER
+  ESCROW
+  REFUND
+  PAYOUT
+  PRESTIGE
+  ADMIN
+}
+enum GameStatus {
+  PENDING
+  ACTIVE
+  WON
+  LOST
+  DRAW
+  CANCELLED
+  EXPIRED
+}
+model GuildConfig {
+  guildId String @id
+  version Int @default(1)
+  settings Json
+  maintenance Boolean @default(false)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+model Member {
+  id String @id @default(cuid())
+  guildId String
+  userId String
+  xp Int @default(0)
+  lifetimeXp Int @default(0)
+  level Int @default(0)
+  prestige Int @default(0)
+  autoPrestige Boolean @default(false)
+  voiceSeconds BigInt @default(0)
+  frozenUntil DateTime?
+  freezeReason String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ledger Ledger[] @relation("ActorLedger")
+  targets Ledger[] @relation("TargetLedger")
+  @@unique([guildId, userId])
+  @@index([guildId, xp])
+  @@index([guildId, voiceSeconds])
+}
+model Ledger {
+  id String @id @default(cuid())
+  guildId String
+  actorId String
+  targetId String?
+  kind LedgerKind
+  amount Int
+  balanceAfter Int
+  reason String
+  gameId String?
+  idempotencyKey String @unique
+  configVersion Int
+  metadata Json?
+  createdAt DateTime @default(now())
+  actor Member @relation("ActorLedger", fields: [actorId], references: [id])
+  target Member? @relation("TargetLedger", fields: [targetId], references: [id])
+  @@index([guildId, createdAt])
+  @@index([actorId, createdAt])
+}
+model Game {
+  id String @id @default(cuid())
+  guildId String
+  type String
+  status GameStatus @default(PENDING)
+  actorUserId String
+  targetUserId String?
+  wager Int @default(0)
+  escrow Int @default(0)
+  state Json
+  fairness Json?
+  expiresAt DateTime?
+  idempotencyKey String @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([guildId, status])
+}
+model Cooldown {
+  id String @id @default(cuid())
+  guildId String
+  userId String
+  key String
+  expiresAt DateTime
+  @@unique([guildId, userId, key])
+}
+model VoiceSession {
+  id String @id @default(cuid())
+  guildId String
+  userId String
+  channelId String
+  startedAt DateTime
+  lastAccruedAt DateTime @default(now())
+  @@unique([guildId, userId])
+}
+model JobExecution {
+  key String @id
+  startedAt DateTime @default(now())
+  completedAt DateTime?
+  metadata Json?
+}
+model AuditLog {
+  id String @id @default(cuid())
+  guildId String
+  actorUserId String?
+  action String
+  detail Json
+  createdAt DateTime @default(now())
+}
+model Raffle {
+  id String @id @default(cuid())
+  guildId String
+  day DateTime @db.Date
+  status String @default("OPEN")
+  result Json?
+  @@unique([guildId, day])
+}
+model QuestProgress {
+  id String @id @default(cuid())
+  guildId String
+  userId String
+  questKey String
+  day DateTime @db.Date
+  progress Int @default(0)
+  claimed Boolean @default(false)
+  @@unique([guildId, userId, questKey, day])
+}
+model Bounty {
+  id String @id @default(cuid())
+  guildId String
+  creatorUserId String
+  targetUserId String
+  escrow Int
+  expiresAt DateTime
+  status String @default("OPEN")
+}

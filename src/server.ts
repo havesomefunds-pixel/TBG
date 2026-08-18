@@ -1,0 +1,2 @@
+import express from 'express'; import type { Client } from 'discord.js'; import { prisma } from './database.js';
+export function createHealthServer(client: Client, port: number) { const app = express(); app.get('/healthz', (_req, res) => res.status(200).json({ ok: true })); app.get('/readyz', async (_req, res) => { try { await prisma.$queryRawUnsafe('SELECT 1'); res.status(client.isReady() ? 200 : 503).json({ ok: client.isReady() }); } catch { res.status(503).json({ ok: false }); } }); return app.listen(port, '127.0.0.1'); }

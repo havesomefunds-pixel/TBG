@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+tbg.env
+tgb.env
+coverage/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+logs/
+runtime/
