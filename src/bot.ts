@@ -145,61 +145,108 @@ function cardEmoji(card: Parameters<typeof cardLabel>[0]): string {
   if (base === undefined || offset === undefined) return label;
   return String.fromCodePoint(base + offset);
 }
-function blackjackEmbed(state: BlackjackState, wager: number, balance: number, terminal = false, result = '', payout = 0) {
+function blackjackEmbed(
+  state: BlackjackState,
+  wager: number,
+  balance: number,
+  terminal = false,
+  result = '',
+  payout = 0
+) {
+    void result;
+    
   const playerCards = state.player.map(cardEmoji).join(' ');
   const dealerCards = terminal
-    ? `${state.dealer.map(cardEmoji).join(' ')}`
+    ? state.dealer.map(cardEmoji).join(' ')
     : `${cardEmoji(state.dealer[0]!)} 🂠`;
 
   const playerValue = blackjackValue(state.player);
-  const dealerValue = terminal ? blackjackValue(state.dealer) : blackjackValue([state.dealer[0]!]);
+  const dealerVisible = blackjackValue([state.dealer[0]!]);
+  const dealerValue = blackjackValue(state.dealer);
 
-  const title = terminal ? '🃏 TBG Blackjack — Result' : '🃏 TBG Blackjack';
-  const description = terminal
-    ? `## ${result}`
-    : 'Use the buttons below to **Hit**, **Stand**, or **Double Down**.';
+  const playerBlackjack = isNaturalBlackjack(state.player);
+  const dealerBlackjack = isNaturalBlackjack(state.dealer);
 
-  const color =
-    terminal && payout === 0
-      ? COLORS.danger
-      : terminal && payout === wager
-        ? COLORS.warning
-        : terminal
-          ? COLORS.success
-          : COLORS.brand;
+  let title = '🃏 TBG Blackjack';
+  let description =
+    'Dealer acts after you **Stand**.\nChoose **Hit**, **Stand**, or **Double Down**.';
+  let color = COLORS.brand;
 
-  return embed(title, description, color).addFields(
+  if (terminal) {
+    if (playerValue > 21) {
+      title = '🔴 TBG Blackjack — BUST';
+      description = `You went over 21 with **${playerValue}**.`;
+      color = COLORS.danger;
+    } else if (playerBlackjack && dealerBlackjack) {
+      title = '🟡 TBG Blackjack — PUSH';
+      description = 'You and the dealer both have **Blackjack**.';
+      color = COLORS.warning;
+    } else if (playerBlackjack) {
+      title = '🟢 TBG Blackjack — BLACKJACK!';
+      description = 'Natural **Blackjack**. You win!';
+      color = COLORS.success;
+    } else if (dealerBlackjack) {
+      title = '🔴 TBG Blackjack — DEALER BLACKJACK';
+      description = 'The dealer has a natural **Blackjack**.';
+      color = COLORS.danger;
+    } else if (dealerValue > 21) {
+      title = '🟢 TBG Blackjack — YOU WIN';
+      description = `Dealer busts with **${dealerValue}**.`;
+      color = COLORS.success;
+    } else if (payout === wager) {
+      title = '🟡 TBG Blackjack — PUSH';
+      description = `You and the dealer both finish with **${playerValue}**.`;
+      color = COLORS.warning;
+    } else if (payout > wager) {
+      title = '🟢 TBG Blackjack — YOU WIN';
+      description = `You beat the dealer **${playerValue} to ${dealerValue}**.`;
+      color = COLORS.success;
+    } else {
+      title = '🔴 TBG Blackjack — YOU LOSE';
+      description = `Dealer wins **${dealerValue} to ${playerValue}**.`;
+      color = COLORS.danger;
+    }
+  }
+
+  const game = embed(title, description, color).addFields(
     {
-      name: '👤 Your Hand',
-      value: `${playerCards}\n**Total:** ${playerValue}`,
-      inline: true,
-    },
-    {
-      name: '🎩 Dealer',
+      name: '🎩 DEALER',
       value: terminal
-        ? `${dealerCards}\n**Total:** ${dealerValue}`
-        : `${dealerCards}\n**Visible:** ${dealerValue}`,
-      inline: true,
+        ? `${dealerCards}\n\n**Total: ${dealerValue}**`
+        : `${dealerCards}\n\n**Visible: ${dealerVisible}**`,
+      inline: false,
     },
     {
-      name: '💰 Wager',
-      value: money(wager),
-      inline: true,
-    },
-    {
-      name: terminal ? '📈 XP Change' : '🔒 Escrowed',
-      value: terminal ? signedXp(payout - wager) : signedXp(-wager),
-      inline: true,
-    },
-    {
-      name: terminal ? '💵 Payout' : '🏦 Balance',
-      value: terminal ? money(payout) : money(balance),
-      inline: true,
-    },
-    ...(terminal
-      ? [{ name: '🪙 New Balance', value: money(balance), inline: true }]
-      : [])
+      name: '👤 YOUR HAND',
+      value: `${playerCards}\n\n**Total: ${playerValue}**`,
+      inline: false,
+    }
   );
+
+  if (terminal) {
+    game.addFields({
+      name: '💰 GAME SUMMARY',
+      value: [
+        `💵 **Wager:** ${money(wager)}`,
+        `📈 **Net XP:** ${signedXp(payout - wager)}`,
+        `💰 **Payout:** ${money(payout)}`,
+        `🏦 **New Balance:** ${money(balance)}`,
+      ].join('\n'),
+      inline: false,
+    });
+  } else {
+    game.addFields({
+      name: '💰 GAME SUMMARY',
+      value: [
+        `💵 **Wager:** ${money(wager)}`,
+        `🔒 **In Play:** ${money(wager)}`,
+        `🏦 **Available Balance:** ${money(balance)}`,
+      ].join('\n'),
+      inline: false,
+    });
+  }
+
+  return game;
 }
 function crashEmbed(description: string, wager: number, balance: number, color = COLORS.brand, point?: number, payout?: number) {
   return embed('📈 TBG Crash', description, color).addFields(
