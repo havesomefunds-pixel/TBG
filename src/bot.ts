@@ -12,7 +12,7 @@ import { awardVoiceXp, startVoice, stopVoice } from './voice.js';
 
 export const PREFIX = '!';
 const COLORS = { brand: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c, muted: 0x99aab5 };
-const COMMANDS = new Set(['ping', 'level', 'levels', 'lb', 'vclb', 'longestcall', 'autoprestige', 'bj', 'slots', 'gamble', 'daily', 'crash', 'vibecheck', 'ship', '8ball', 'raffle', 'quests', 'bounty', 'tictactoe', 'duel', 'rob', 'donate', 'coinflip', 'give', 'prestige', 'admin-settings-export', 'admin-settings', 'admin-freeze']);
+const COMMANDS = new Set(['ping', 'level', 'levels', 'lb', 'vclb', 'longestcall', 'autoprestige', 'bj', 'slots', 'gamble', 'daily', 'crash', 'vibecheck', 'ship', '8ball', 'raffle', 'quests', 'bounty', 'tictactoe', 'duel', 'rob', 'donate', 'coinflip', 'give', 'givexp', 'prestige', 'admin-settings-export', 'admin-settings', 'admin-freeze']);
 const EIGHT_BALL = ['Absolutely.', 'Signs point to yes.', 'Ask again after the next round.', 'The vibes say no.', 'Without a doubt.', 'Not today.', 'It is decidedly so.', 'Better not tell you now.'];
 
 export type PrefixInvocation = { name: string; args: string[] };
@@ -154,7 +154,7 @@ function blackjackEmbed(
   payout = 0
 ) {
     void result;
-    
+
   const playerCards = state.player.map(cardEmoji).join(' ');
   const dealerCards = terminal
     ? state.dealer.map(cardEmoji).join(' ')
@@ -329,6 +329,73 @@ async function prefixCommand(message: Message, command: PrefixInvocation, config
   const member = message.member as GuildMember | null;
   if (!member) throw new Error('Your guild membership could not be verified. Please try again.');
   if (settings.maintenance && !isAdmin(member, adminRoles(config))) throw new Error('Maintenance mode is enabled.');
+    if (name === 'givexp') {
+    if (!isAdmin(member, adminRoles(config))) {
+      throw new Error('Admin authorization required.');
+    }
+
+    const target = requireMention(message, args[0], '!givexp @user <amount>');
+
+    if (target.bot) {
+      throw new Error('You cannot give XP to a bot.');
+    }
+
+    const amount = requireInteger(args[1], '!givexp @user <amount>');
+
+    if (amount < 1 || amount > 1_000_000) {
+      throw new Error('XP amount must be between 1 and 1,000,000.');
+    }
+
+    await grantCappedXp(
+      {
+        guildId,
+        userId: target.id,
+        requested: amount,
+        hourlyCap: Number.MAX_SAFE_INTEGER,
+        kind: 'XP_AWARD',
+        reason: `admin XP grant by ${message.author.id}`,
+        idempotencyKey: `admin-givexp:${message.id}`,
+        configVersion: settings.version,
+      },
+      settings.settings.progression
+    );
+
+    const updated = await prisma.member.findUnique({
+      where: {
+        guildId_userId: {
+          guildId,
+          userId: target.id,
+        },
+      },
+    });
+
+    if (!updated) {
+      throw new Error('The user XP profile could not be loaded after the grant.');
+    }
+
+    const progress = progressFor(
+      updated.xp,
+      settings.settings.progression
+    );
+
+    return void await message.reply({
+      embeds: [
+        embed(
+          '💰 Admin XP Grant',
+          [
+            `<@${target.id}> received **${money(amount)}**.`,
+            '',
+            `**New XP:** ${money(updated.xp)}`,
+            `**Level:** ${progress.level}`,
+            `**To next level:** ${money(progress.xpToNext)}`,
+            '',
+            `Granted by <@${message.author.id}>`,
+          ].join('\n'),
+          COLORS.success
+        ),
+      ],
+    });
+  }
   if (!featureEnabled(settings.settings, name)) throw new Error('This feature is currently disabled.');
   if (!allowed(settings.settings, message.channelId) && !name.startsWith('admin-')) throw new Error('This command is not enabled in this channel.');
   if (!isUnlocked(name, profile.level) && !name.startsWith('admin-')) throw new Error(`Unlocks at a higher level (you are level ${profile.level}).`);
